@@ -1,4 +1,4 @@
-import { type EngineInterface, type HookStream, type ProcessSpawnResult, type Register, type RenderElement, type RenderSurface, type Timer, update } from 'claude-code'
+import { type CommandPresentation, type EngineInterface, type HookStream, type ProcessSpawnResult, type Register, type RenderElement, type RenderSurface, type Timer, update } from 'claude-code'
 import { herdrError, herdrOpenCommand, herdrPane, isBinaryPath, LINUX_LAUNCH, openCommand, openWithCommand, type Target, terminalTarget, tmuxCommand, tmuxOpenCommand, words } from './open'
 import type { ButtonProps } from './button'
 import { CACHE_KEEP, cacheName, CLEAN, coderFor, EXIT_FAILED, EXIT_LOCKED, EXIT_MISSING, fitCells, PNG_DIRECT_BYTES, PNG_DIRECT_PIXELS, pictureKind, pngSize, POLICY, POSTER } from './peek'
@@ -2363,6 +2363,27 @@ function shortPath(path: string): string {
   return home && inside(home, path) ? `~${path.slice(home.length)}` : path
 }
 
+async function showOrHide($: EngineInterface, args: string, presentation: CommandPresentation): Promise<string> {
+  const given = args.trim()
+  const mine = given ? undefined : (await $.ui.panes().catch(() => [])).find(p => p.id === PANE)
+  if (mine?.isShown) {
+    noDock = true
+    if (zjump.on) jumpClose($)
+    await $.ui.close({ id: PANE }).catch(() => undefined)
+    return 'File tree closed.'
+  }
+  const terminal = await $.session.surfaces().then(s => s.includes('terminal'), () => true)
+  if (terminal && !presentation.isFullscreen) return 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.'
+  if (terminal && presentation.columns < 110) return 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.'
+  noDock = false
+  const arg = given === 'open' ? '' : given
+  const cwd = await cwdOf($)
+  follow = !arg
+  const root = arg ? resolve(cwd, arg, home) : cwd
+  await reset($, root, focusOnOpen || given !== '' || mine?.isPlaced === true)
+  return `File tree on ${shortPath(root)}${follow ? ' (follows the cwd)' : ''}.`
+}
+
 export const register: Register = (on, options) => {
   glyphSetting = typeof options?.glyphs === 'string' ? options.glyphs : 'auto'
   const activity = typeof options?.activity === 'string' ? options.activity : 'reads and writes'
@@ -2441,24 +2462,32 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'filetree' }, async ($, e) => {
-    const given = (e.args ?? '').trim()
-    const mine = given ? undefined : (await $.ui.panes().catch(() => [])).find(p => p.id === PANE)
-    if (mine?.isShown) {
-      noDock = true
-      if (zjump.on) jumpClose($)
-      await $.ui.close({ id: PANE }).catch(() => undefined)
-      return { text: 'File tree closed.' }
+    const text = await showOrHide($, e.args ?? '', e.presentation)
+    void $.ui.invalidate('ui.render')
+    return { text }
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const below = await next(e)
+    if (e.props.hasSurvey || e.surface !== 'terminal') return below
+    const shown = (await $.ui.panes().catch(() => [])).some(p => p.id === PANE && p.isShown)
+    const presentation: CommandPresentation = { isFullscreen: e.viewport?.isFullscreen === true, columns: e.viewport?.columns ?? 80 }
+    const press = async () => {
+      const text = await showOrHide($, '', presentation)
+      if (!text.startsWith('File tree')) void $.ui.toast(text)
+      void $.ui.invalidate('ui.render')
     }
-    const terminal = await $.session.surfaces().then(s => s.includes('terminal'), () => true)
-    if (terminal && !e.presentation.isFullscreen) return { text: 'filetree shows in the sidebar, which needs the fullscreen layout. Run /tui fullscreen, then /filetree.' }
-    if (terminal && e.presentation.columns < 110) return { text: 'filetree shows in the sidebar, which needs a terminal at least 110 columns wide. Widen it, then run /filetree.' }
-    noDock = false
-    const arg = given === 'open' ? '' : given
-    const cwd = await cwdOf($)
-    follow = !arg
-    const root = arg ? resolve(cwd, arg, home) : cwd
-    await reset($, root, focusOnOpen || given !== '' || mine?.isPlaced === true)
-    return { text: `File tree on ${shortPath(root)}${follow ? ' (follows the cwd)' : ''}.` }
+    const { Box, Button, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {below}
+        <Box justifyContent="flex-end">
+          <Button key="filetree-toggle" plain onPress={() => void press()}>
+            <Text dimColor>{shown ? 'files ▸' : '◂ files'}</Text>
+          </Button>
+        </Box>
+      </Box>
+    )
   })
 
   on('tool.call', async ($, e, next) => {
@@ -2628,7 +2657,9 @@ export const register: Register = (on, options) => {
 
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && zjump.on) jumpClose($)
-    return next(e)
+    const result = await next(e)
+    if (e.id === PANE) void $.ui.invalidate('ui.render')
+    return result
   })
 
   on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
