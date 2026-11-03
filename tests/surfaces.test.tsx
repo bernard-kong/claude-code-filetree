@@ -3607,12 +3607,39 @@ test('desktop: in LOC mode a window past the first 400 rows still measures and d
 
 const BAND = { plugin: 'filetree', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 4, bodyColumns: 140, scroll: { offset: 0, bodyRows: 0 }, view: {} } } as const
 
+const widths: number[] = []
+
 function beneath(on: On) {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
-    const { Box } = $.ui.resolve(e)
-    return <Box />
+    widths.push(e.props.bodyColumns)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text>progress</Text>
+        <Text>status row</Text>
+      </Box>
+    )
   })
 }
+
+test('the band button shares the last row of the bands beneath it, which get its width less', { timeoutMs: 20_000, options: { start: 'off' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  beneath(on)
+  on('ui.panes', () => ({ value: [] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 140, rows: 40, isFullscreen: true } })
+  expect(widths.at(-1)).toBe(132)
+  const tree = await ui.drawn()
+  expect(tree).toMatchObject({ props: { flexDirection: 'row' } })
+  const json = JSON.stringify(tree)
+  expect(json.indexOf('status row')).toBeGreaterThan(-1)
+  expect(json.indexOf('◂ files')).toBeGreaterThan(json.indexOf('status row'))
+  expect(json).toContain('"alignSelf":"flex-end"')
+  await ui.unmount()
+})
 
 test('the band button opens and closes the tree from the terminal, also while a turn runs', { timeoutMs: 20_000, options: { start: 'off' } }, async ($, on) => {
   const ran: Ran = []
@@ -3631,15 +3658,15 @@ test('the band button opens and closes the tree from the terminal, also while a 
   await clock.settle()
   expect(shown()).toBe(false)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 140, rows: 40, isFullscreen: true } })
-  expect(await ui.find({ type: 'Text', text: '◂ files' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ◂ files' })).toBeDefined()
   await ui.press({ key: 'filetree-toggle' })
   await clock.settle()
   expect(shown()).toBe(true)
-  expect(await ui.find({ type: 'Text', text: 'files ▸' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' files ▸' })).toBeDefined()
   await ui.press({ key: 'filetree-toggle' })
   await clock.settle()
   expect(shown()).toBe(false)
-  expect(await ui.find({ type: 'Text', text: '◂ files' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ◂ files' })).toBeDefined()
   expect(ran.filter(r => r[0] === 'toast')).toEqual([])
   await ui.unmount()
 })

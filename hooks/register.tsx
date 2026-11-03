@@ -2363,6 +2363,8 @@ function shortPath(path: string): string {
   return home && inside(home, path) ? `~${path.slice(home.length)}` : path
 }
 
+const BAND_BUTTON = 8
+
 async function showOrHide($: EngineInterface, args: string, presentation: CommandPresentation): Promise<string> {
   const given = args.trim()
   const mine = given ? undefined : (await $.ui.panes().catch(() => [])).find(p => p.id === PANE)
@@ -2468,8 +2470,8 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const below = await next(e)
-    if (e.props.hasSurvey || e.surface !== 'terminal') return below
+    if (e.props.hasSurvey || e.surface !== 'terminal') return next(e)
+    const below = await next({ ...e, props: { ...e.props, bodyColumns: Math.max(0, e.props.bodyColumns - BAND_BUTTON) } })
     const shown = (await $.ui.panes().catch(() => [])).some(p => p.id === PANE && p.isShown)
     const presentation: CommandPresentation = { isFullscreen: e.viewport?.isFullscreen === true, columns: e.viewport?.columns ?? 80 }
     const press = async () => {
@@ -2479,11 +2481,13 @@ export const register: Register = (on, options) => {
     }
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
-      <Box flexDirection="column">
-        {below}
-        <Box justifyContent="flex-end">
+      <Box flexDirection="row">
+        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+          {below}
+        </Box>
+        <Box alignSelf="flex-end" flexShrink={0}>
           <Button key="filetree-toggle" plain onPress={() => void press()}>
-            <Text dimColor>{shown ? 'files ▸' : '◂ files'}</Text>
+            <Text dimColor>{shown ? ' files ▸' : ' ◂ files'}</Text>
           </Button>
         </Box>
       </Box>
