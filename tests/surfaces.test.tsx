@@ -50,6 +50,7 @@ type World = {
 type Ran = string[][]
 const HERDR_SPLIT = '{"id":"cli:pane:split","result":{"pane":{"agent_status":"unknown","cwd":"/home/k/proj","focused":false,"pane_id":"w1:p37","parent_pane_id":"w1:p35","tab_id":"w1:tV","workspace_id":"w1"},"type":"pane_info"}}'
 const opens: unknown[] = []
+const registered: unknown[] = []
 const envs: Record<string, string>[] = []
 
 function world(on: On, w: World, ran: Ran) {
@@ -59,7 +60,10 @@ function world(on: On, w: World, ran: Ran) {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: w.cwd }))
   on('session.id', () => ({ value: 'test-session' }))
-  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('command.register', (_$, e) => {
+    registered.push(e)
+    return { value: { command: e.name } }
+  })
   on('ui.open', (_$, e) => {
     opens.push(e)
     return { value: { isPlaced: true } }
@@ -921,6 +925,15 @@ test('in the desktop app /filetree opens the pane without the terminal layout ch
   expect(JSON.stringify(r)).toContain('File tree on')
   expect(opens.length).toBeGreaterThan(before)
   expect(opens.at(-1)).toMatchObject({ id: 'filetree', focus: true })
+})
+
+test('/filetree registers as immediate so it toggles the tree while a turn runs', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(registered.at(-1)).toMatchObject({ name: 'filetree', immediate: true })
 })
 
 test('focus on open off: a bare /filetree opens the tree without taking the keyboard, /filetree open still takes it', { timeoutMs: 20_000, options: { focus: 'off' } }, async ($, on) => {
@@ -3589,5 +3602,100 @@ test('desktop: in LOC mode a window past the first 400 rows still measures and d
   const row = JSON.stringify(every(tree, n => has(n, 'type') && n.type === 'Box' && keyOf(n) === `row:${root}/c0900.ts`)[0])
   expect(shown).toContain('"children":["LOC"]')
   expect(row).toContain('"children":["42"]')
+  await ui.unmount()
+})
+
+const BAND = { plugin: 'filetree', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 4, bodyColumns: 140, scroll: { offset: 0, bodyRows: 0 }, view: {} } } as const
+
+const widths: number[] = []
+
+function beneath(on: On) {
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
+    widths.push(e.props.bodyColumns)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text>progress</Text>
+        <Text>status row</Text>
+      </Box>
+    )
+  })
+}
+
+test('the band button shares the last row of the bands beneath it, which get its width less', { timeoutMs: 20_000, options: { start: 'off' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  beneath(on)
+  on('ui.panes', () => ({ value: [] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 140, rows: 40, isFullscreen: true } })
+  expect(widths.at(-1)).toBe(132)
+  const tree = await ui.drawn()
+  expect(tree).toMatchObject({ props: { flexDirection: 'row' } })
+  const json = JSON.stringify(tree)
+  expect(json.indexOf('status row')).toBeGreaterThan(-1)
+  expect(json.indexOf('◂ files')).toBeGreaterThan(json.indexOf('status row'))
+  expect(json).toContain('"alignSelf":"flex-end"')
+  await ui.unmount()
+})
+
+test('the band button opens and closes the tree from the terminal, also while a turn runs', { timeoutMs: 20_000, options: { start: 'off' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  beneath(on)
+  const start = opens.length
+  let closedAt = -1
+  const shown = () => opens.length > start && closedAt !== opens.length
+  on('ui.close', () => {
+    closedAt = opens.length
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: opens.length > start ? [{ id: 'filetree', title: 'Files', isFocused: false, isShown: shown(), isPlaced: shown() }] : [] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(shown()).toBe(false)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 140, rows: 40, isFullscreen: true } })
+  expect(await ui.find({ type: 'Text', text: ' ◂ files' })).toBeDefined()
+  await ui.press({ key: 'filetree-toggle' })
+  await clock.settle()
+  expect(shown()).toBe(true)
+  expect(await ui.find({ type: 'Text', text: ' files ▸' })).toBeDefined()
+  await ui.press({ key: 'filetree-toggle' })
+  await clock.settle()
+  expect(shown()).toBe(false)
+  expect(await ui.find({ type: 'Text', text: ' ◂ files' })).toBeDefined()
+  expect(ran.filter(r => r[0] === 'toast')).toEqual([])
+  await ui.unmount()
+})
+
+test('the band button explains the fullscreen layout instead of opening the tree on the main screen', { timeoutMs: 20_000, options: { start: 'off' } }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  beneath(on)
+  on('ui.panes', () => ({ value: [] }))
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const before = opens.length
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 140, rows: 40, isFullscreen: false } })
+  await ui.press({ key: 'filetree-toggle' })
+  await clock.settle()
+  expect(opens.length).toBe(before)
+  expect(JSON.stringify(ran)).toContain('/tui fullscreen')
+  await ui.unmount()
+})
+
+test('the band button is terminal only: the desktop app docks the tree itself', { timeoutMs: 20_000 }, async ($, on) => {
+  const ran: Ran = []
+  const root = '/home/k/proj'
+  const clock = world(on, { os: 'linux', env: { HOME: '/home/k' }, cwd: root, top: '', dirs: { [root]: [['a.txt', 'file']] }, status: '', numstat: '' }, ran)
+  beneath(on)
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /files/ })).toBeUndefined()
   await ui.unmount()
 })
